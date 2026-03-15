@@ -28,7 +28,9 @@
     "@nestjs/platform-express": "^11.0.1",
     "axios": "^1.13.6",
     "mqtt": "^5.15.0",
+    "node-onvif": "^0.1.7",
     "node-telegram-bot-api": "^0.67.0",
+    "onvif": "^0.8.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },

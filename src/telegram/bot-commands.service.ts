@@ -3,6 +3,8 @@ import { SendMessageOptions } from 'node-telegram-bot-api';
 import { FrigateService } from '../frigate/frigate.service';
 import { NotificationStateService } from './notification-state.service';
 import { TelegramService } from './telegram.service';
+import { OnvifService } from 'src/onvif/onvif.service';
+import { InlineKeyboardButton } from 'node-telegram-bot-api';
 
 @Injectable()
 export class BotCommandsService {
@@ -13,6 +15,7 @@ export class BotCommandsService {
     private readonly telegram: TelegramService,
     private readonly frigate: FrigateService,
     private readonly state: NotificationStateService,
+    private readonly onvifService: OnvifService,
   ) {}
 
   registerHandlers(bot: any) {
@@ -23,7 +26,7 @@ export class BotCommandsService {
             { text: '🔔 Включить уведомления' },
             { text: '🔕 Выключить уведомления' },
           ],
-          [{ text: '📸 Кадр с камеры' }],
+          [{ text: '📷 Камеры' }],
         ],
         resize_keyboard: true,
       },
@@ -62,7 +65,7 @@ export class BotCommandsService {
           );
           this.logger.log(`Notifications disabled for chat ${chatId}`);
           break;
-        case '📸 Кадр с камеры':
+        case '📷 Камеры':
           await this.showCameraSelection(chatId);
           break;
         default:
@@ -70,6 +73,7 @@ export class BotCommandsService {
       }
       await this.telegram.deleteMessage(chatId, msg.message_id);
     });
+
     bot.onText(/\/enable_notifications/, async (msg: any) => {
       this.state.setEnabled(msg.chat.id, true);
       await this.telegram.sendMessage(
@@ -90,24 +94,65 @@ export class BotCommandsService {
       await this.telegram.deleteMessage(msg.chat.id, msg.message_id);
     });
 
-    bot.onText(/\/snapshot$/, async (msg: any) => {
-      await this.showCameraSelection(msg.chat.id);
-      await this.telegram.deleteMessage(msg.chat.id, msg.message_id);
-    });
-
     bot.on('callback_query', async (query: any) => {
       const chatId = query.message?.chat.id;
       if (!chatId || !query.data) return;
 
-      if (query.message) {
-        await this.telegram.deleteMessage(chatId, query.message.message_id);
-        this.state.clearLastCameraMessageId(chatId);
-      }
+      const data = query.data;
+      const messageId = query.message?.message_id;
 
-      if (query.data.startsWith('camera:')) {
-        const camera = query.data.substring(7);
+      if (data.startsWith('camera:')) {
+        if (messageId) {
+          await this.telegram.deleteMessage(chatId, messageId);
+          this.state.clearLastCameraMessageId(chatId);
+        }
+        const camera = data.substring(7);
+
         await this.telegram.answerCallbackQuery(query.id);
-        await this.sendSnapshot(chatId, camera);
+        await this.showCameraInfo(chatId, camera);
+      } else if (data.startsWith('preset:')) {
+        const parts = data.split(':');
+        if (parts.length >= 3) {
+          const camera = parts[1];
+          const presetToken = parts.slice(2).join(':');
+          const cameraConfig = await this.frigate.getCameraConfig(camera);
+
+          if (cameraConfig?.onvif?.host) {
+            const presets = this.state.getPresets(camera);
+            const preset = presets?.find((p) => p.token === presetToken);
+            if (preset) {
+              const success = await this.onvifService.gotoPreset(
+                camera,
+                cameraConfig.onvif,
+                preset.token,
+              );
+              await this.telegram.answerCallbackQuery(
+                query.id,
+                success ? 'Камера повернута' : 'Ошибка поворота',
+              );
+            } else {
+              await this.telegram.answerCallbackQuery(
+                query.id,
+                'Предустановка не найдена',
+              );
+            }
+          }
+        }
+      } else if (data.startsWith('refresh:')) {
+        const camera = data.substring(8);
+        if (messageId) {
+          await this.telegram.deleteMessage(chatId, messageId);
+          this.state.clearLastCameraMessageId(chatId);
+        }
+        await this.telegram.answerCallbackQuery(query.id);
+        await this.showCameraInfo(chatId, camera);
+      } else if (data === 'back_to_cameras') {
+        if (messageId) {
+          await this.telegram.deleteMessage(chatId, messageId);
+          this.state.clearLastCameraMessageId(chatId);
+        }
+        await this.telegram.answerCallbackQuery(query.id);
+        await this.showCameraSelection(chatId);
       }
     });
   }
@@ -144,19 +189,77 @@ export class BotCommandsService {
     }
   }
 
-  private async sendSnapshot(chatId: number, camera: string) {
+  private async showCameraInfo(chatId: number, camera: string) {
+    const prevMsgId = this.state.getLastCameraMessageId(chatId);
+    if (prevMsgId) {
+      await this.telegram.deleteMessage(chatId, prevMsgId);
+      this.state.clearLastCameraMessageId(chatId);
+    }
+
     const snapshot = await this.frigate.getSnapshot(camera);
-    if (snapshot) {
-      await this.telegram.sendPhoto(
-        chatId,
-        snapshot,
-        `📸 Снимок с камеры ${camera}`,
-      );
+
+    const cameraConfig = await this.frigate.getCameraConfig(camera);
+    let description = `Камера: ${camera}\n`;
+    let hasPtz = false;
+    let presets: { token: string; name: string }[] = [];
+
+    console.log(cameraConfig);
+
+    if (cameraConfig?.onvif?.host) {
+      hasPtz = true;
+      description += `Тип: PTZ\n`;
+      try {
+        presets = await this.onvifService.getPresets(
+          camera,
+          cameraConfig.onvif,
+        );
+        this.state.setPresets(camera, presets);
+
+        if (presets.length > 0) {
+          description += `Доступно предустановок: ${presets.length}\n`;
+        } else {
+          description += `Предустановки не найдены.\n`;
+        }
+      } catch (e) {
+        this.logger.error(`Failed to get presets for ${camera}`, e);
+        description += `Ошибка получения предустановок.\n`;
+      }
     } else {
-      await this.telegram.sendMessage(
-        chatId,
-        `Не удалось получить снимок с камеры ${camera}.`,
-      );
+      description += `Тип: обычная камера\n`;
+    }
+
+    const inlineKeyboard: InlineKeyboardButton[][] = [];
+
+    if (hasPtz && presets.length > 0) {
+      const presetButtons = presets.map((p) => ({
+        text: p.name || p.token,
+        callback_data: `preset:${camera}:${p.token}`,
+      }));
+      for (let i = 0; i < presetButtons.length; i += 2) {
+        inlineKeyboard.push(presetButtons.slice(i, i + 2));
+      }
+    }
+    const actionRow = [
+      { text: '🔄 Обновить фото', callback_data: `refresh:${camera}` },
+      { text: '🔙 К списку камер', callback_data: 'back_to_cameras' },
+    ];
+    inlineKeyboard.push(actionRow);
+
+    const replyMarkup = { inline_keyboard: inlineKeyboard };
+
+    let sentMsg;
+    if (snapshot) {
+      sentMsg = await this.telegram.sendPhoto(chatId, snapshot, description, {
+        reply_markup: replyMarkup,
+      });
+    } else {
+      sentMsg = await this.telegram.sendMessage(chatId, description, {
+        reply_markup: replyMarkup,
+      });
+    }
+
+    if (sentMsg?.message_id) {
+      this.state.setLastCameraMessageId(chatId, sentMsg.message_id);
     }
   }
 

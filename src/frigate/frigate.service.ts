@@ -15,6 +15,10 @@ export class FrigateService {
   private readonly password?: string;
   private readonly pollingIntervalSeconds: number;
 
+  private cachedConfig: any = null;
+  private lastConfigFetch: number = 0;
+  private readonly CONFIG_TTL = 60000; // 1 минута
+
   constructor(private readonly configService: ConfigService) {
     this.baseUrl = this.configService.get<string>('FRIGATE_URL') ?? '';
     this.mediaUrl =
@@ -46,7 +50,6 @@ export class FrigateService {
         },
       };
     }
-
     return undefined;
   }
 
@@ -55,23 +58,9 @@ export class FrigateService {
     return Math.floor((nowMs - seconds * 1000) / 1000);
   }
 
-  async getStatus(): Promise<number | undefined> {
-    try {
-      const url = `${this.baseUrl}/api/version`;
-      const axiosConfig: AxiosRequestConfig = this.authConfig ?? {};
-
-      const response = await axios.get(url, axiosConfig);
-      return response.status;
-    } catch (error) {
-      this.logger.warn('Cannot fetch Frigate status', error as Error);
-      return undefined;
-    }
-  }
-
   async getEvents(): Promise<any[] | undefined> {
     try {
       const url = `${this.baseUrl}/api/events`;
-
       const params: Record<string, string | number | undefined> = {
         camera: this.camera,
         zones: this.zones,
@@ -80,91 +69,16 @@ export class FrigateService {
           this.pollingIntervalSeconds,
         ),
       };
-
       const axiosConfig: AxiosRequestConfig = {
         params,
         ...(this.authConfig ?? {}),
       };
-
       const response = await axios.get(url, axiosConfig);
       return response.data;
     } catch (error) {
       this.logger.warn('Cannot fetch events from Frigate', error as Error);
       return undefined;
     }
-  }
-
-  async getSnapshotWithRetry(
-    eventId: string,
-    maxRetries = 3,
-    retryDelayMs = 1000,
-  ): Promise<Buffer | null> {
-    const axiosConfig: AxiosRequestConfig = {
-      responseType: 'arraybuffer',
-      ...(this.authConfig ?? {}),
-    };
-
-    for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
-      try {
-        const snapshotUrl = `${this.baseUrl}/api/events/${eventId}/snapshot.jpg`;
-        const response = await axios.get(snapshotUrl, axiosConfig);
-        this.logger.log(
-          `Snapshot fetched for event ${eventId} on attempt ${attempt}`,
-        );
-        return Buffer.from(response.data);
-      } catch (error) {
-        if (attempt < maxRetries) {
-          this.logger.warn(
-            `Failed to fetch snapshot for event ${eventId} (attempt ${attempt}/${maxRetries}), retrying in ${retryDelayMs}ms...`,
-          );
-          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-        } else {
-          this.logger.error(
-            `Failed to fetch snapshot for event ${eventId} after ${maxRetries} attempts.`,
-            error as Error,
-          );
-        }
-      }
-    }
-    return null;
-  }
-
-  async getThumbnailWithRetry(
-    eventId: string,
-    maxRetries = 3,
-    retryDelayMs = 1000,
-  ): Promise<Buffer | null> {
-    const axiosConfig: AxiosRequestConfig = {
-      responseType: 'arraybuffer',
-      ...(this.authConfig ?? {}),
-    };
-
-    for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
-      try {
-        const thumbnailUrl = `${this.baseUrl}/api/events/${eventId}/thumbnail.jpg`;
-        const response = await axios.get(thumbnailUrl, axiosConfig);
-
-        this.logger.log(
-          `Thumbnail fetched for event ${eventId} on attempt ${attempt}`,
-        );
-
-        return Buffer.from(response.data);
-      } catch (error) {
-        if (attempt < maxRetries) {
-          this.logger.warn(
-            `Failed to fetch thumbnail for event ${eventId} (attempt ${attempt}/${maxRetries}), retrying in ${retryDelayMs}ms...`,
-          );
-          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-        } else {
-          this.logger.error(
-            `Failed to fetch thumbnail for event ${eventId} after ${maxRetries} attempts.`,
-            error as Error,
-          );
-        }
-      }
-    }
-
-    return null;
   }
 
   async getPreviewGifWithRetry(
@@ -176,16 +90,13 @@ export class FrigateService {
       responseType: 'arraybuffer',
       ...(this.authConfig ?? {}),
     };
-
     for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
       try {
         const previewUrl = `${this.baseUrl}/api/events/${eventId}/preview.gif`;
         const response = await axios.get(previewUrl, axiosConfig);
-
         this.logger.log(
           `Preview GIF fetched for event ${eventId} on attempt ${attempt}`,
         );
-
         return Buffer.from(response.data);
       } catch (error) {
         if (attempt < maxRetries) {
@@ -201,7 +112,6 @@ export class FrigateService {
         }
       }
     }
-
     return null;
   }
 
@@ -248,7 +158,6 @@ export class FrigateService {
       responseType: 'arraybuffer',
       ...(this.authConfig ?? {}),
     };
-
     for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
       try {
         const clipUrl = `${this.baseUrl}/api/events/${eventId}/clip.mp4`;
@@ -274,7 +183,97 @@ export class FrigateService {
     return null;
   }
 
+  async getEventSnapshotWithRetry(
+    eventId: string,
+    maxRetries = 3,
+    retryDelayMs = 1000,
+  ): Promise<Buffer | null> {
+    const axiosConfig: AxiosRequestConfig = {
+      responseType: 'arraybuffer',
+      ...(this.authConfig ?? {}),
+    };
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const url = `${this.baseUrl}/api/events/${eventId}/snapshot.jpg`;
+        const response = await axios.get(url, axiosConfig);
+        this.logger.log(
+          `Snapshot fetched for event ${eventId} on attempt ${attempt}`,
+        );
+        return Buffer.from(response.data);
+      } catch (error) {
+        if (attempt < maxRetries) {
+          this.logger.warn(
+            `Failed to fetch snapshot for event ${eventId} (attempt ${attempt}/${maxRetries}), retrying in ${retryDelayMs}ms...`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+        } else {
+          this.logger.error(
+            `Failed to fetch snapshot for event ${eventId} after ${maxRetries} attempts.`,
+            error as Error,
+          );
+        }
+      }
+    }
+    return null;
+  }
+
+  async getEventThumbnailWithRetry(
+    eventId: string,
+    maxRetries = 3,
+    retryDelayMs = 1000,
+  ): Promise<Buffer | null> {
+    const axiosConfig: AxiosRequestConfig = {
+      responseType: 'arraybuffer',
+      ...(this.authConfig ?? {}),
+    };
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const url = `${this.baseUrl}/api/events/${eventId}/thumbnail.jpg`;
+        const response = await axios.get(url, axiosConfig);
+        this.logger.log(
+          `Thumbnail fetched for event ${eventId} on attempt ${attempt}`,
+        );
+        return Buffer.from(response.data);
+      } catch (error) {
+        if (attempt < maxRetries) {
+          this.logger.warn(
+            `Failed to fetch thumbnail for event ${eventId} (attempt ${attempt}/${maxRetries}), retrying in ${retryDelayMs}ms...`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+        } else {
+          this.logger.error(
+            `Failed to fetch thumbnail for event ${eventId} after ${maxRetries} attempts.`,
+            error as Error,
+          );
+        }
+      }
+    }
+    return null;
+  }
+
   getMediaBaseUrl(): string {
     return this.mediaUrl;
+  }
+
+  private async fetchConfig(): Promise<any> {
+    const now = Date.now();
+    if (this.cachedConfig && now - this.lastConfigFetch < this.CONFIG_TTL) {
+      return this.cachedConfig;
+    }
+    try {
+      const url = `${this.baseUrl}/api/config`;
+      const response = await axios.get(url, this.authConfig ?? {});
+      this.cachedConfig = response.data;
+      this.lastConfigFetch = now;
+      return this.cachedConfig;
+    } catch (error) {
+      this.logger.error('Failed to fetch Frigate config', error);
+      throw error;
+    }
+  }
+
+  async getCameraConfig(cameraName: string): Promise<any> {
+    const config = await this.fetchConfig();
+    return config?.cameras?.[cameraName] || null;
   }
 }
