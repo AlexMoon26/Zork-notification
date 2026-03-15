@@ -23,7 +23,10 @@ interface TelegramBotClient {
   on(event: 'polling_error', listener: (error: Error) => void): void;
   on(event: 'message', listener: (msg: TelegramMessage) => void): void;
   on(event: 'callback_query', listener: (query: any) => void): this;
-  answerCallbackQuery(callbackQueryId: string): Promise<unknown>;
+  answerCallbackQuery(
+    callbackQueryId: string,
+    options?: { text?: string },
+  ): Promise<unknown>;
   onText(
     regexp: RegExp,
     callback: (msg: TelegramMessage, match: RegExpExecArray | null) => void,
@@ -100,11 +103,18 @@ export class TelegramService implements OnModuleInit {
     chatId: number,
     photo: Buffer,
     caption?: string,
-  ): Promise<void> {
+    options?: SendPhotoOptions,
+  ): Promise<any> {
     try {
-      await this.bot.sendPhoto(chatId, photo, { caption, parse_mode: 'HTML' });
+      const finalOptions: SendPhotoOptions = {
+        caption,
+        parse_mode: 'HTML',
+        ...options,
+      };
+      return await this.bot.sendPhoto(chatId, photo, finalOptions);
     } catch (error) {
       this.logger.error('Error sending photo', error);
+      return null;
     }
   }
 
@@ -120,10 +130,7 @@ export class TelegramService implements OnModuleInit {
       const options: SendVideoOptions = {
         caption,
         parse_mode: 'HTML',
-        // Если нужно указать имя файла, можно добавить filename (зависит от версии библиотеки)
-        // filename: 'clip.mp4',
       };
-      // Убираем fileOptions, так как могут быть проблемы с типами
       const result = await this.bot.sendVideo(chatId, video, options);
       this.logger.log(
         `sendVideo completed successfully, message_id=${(result as any)?.message_id}`,
@@ -136,9 +143,10 @@ export class TelegramService implements OnModuleInit {
     }
   }
 
-  async answerCallbackQuery(queryId: string): Promise<void> {
+  async answerCallbackQuery(queryId: string, text?: string): Promise<void> {
     try {
-      await this.bot.answerCallbackQuery(queryId);
+      const options = text ? { text } : undefined;
+      await this.bot.answerCallbackQuery(queryId, options);
     } catch (error) {
       this.logger.error('Error answering callback query', error);
     }

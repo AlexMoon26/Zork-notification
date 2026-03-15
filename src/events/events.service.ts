@@ -55,7 +55,7 @@ export class EventsService {
     const caption = `🚗 <b>Обнаружен номер</b>\n📷 Камера: ${data.camera}\n🔢 Номер: <b>${data.plate}</b>\n🎯 Уверенность: ${Math.round(data.score * 100)}%\n🕒 Время: ${date}`;
 
     try {
-      const snapshot = await this.frigateService.getSnapshotWithRetry(
+      const snapshot = await this.frigateService.getEventSnapshotWithRetry(
         data.eventId,
         5,
         3000,
@@ -119,9 +119,8 @@ export class EventsService {
   private async sendNewEventNotification(event: any): Promise<void> {
     try {
       const eventMessage = this.formatEventMessage(event);
-      const thumbnailBuffer = await this.frigateService.getThumbnailWithRetry(
-        event.id,
-      );
+      const thumbnailBuffer =
+        await this.frigateService.getEventThumbnailWithRetry(event.id);
       if (thumbnailBuffer) {
         await this.telegramService.sendPhoto(
           this.chatId,
@@ -155,9 +154,8 @@ export class EventsService {
         this.logger.log(
           `Event ${event.id} ended but has_clip=false, sending only thumbnail if available`,
         );
-        const thumbnailBuffer = await this.frigateService.getThumbnailWithRetry(
-          event.id,
-        );
+        const thumbnailBuffer =
+          await this.frigateService.getEventThumbnailWithRetry(event.id);
         if (thumbnailBuffer) {
           await this.telegramService.sendPhoto(
             this.chatId,
